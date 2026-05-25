@@ -8,7 +8,6 @@ LLM: Qwen/Qwen2.5-72B-Instruct (HuggingFace 免费推理 API)
 
 import os
 import re
-import time
 import gradio as gr
 from pathlib import Path
 
@@ -72,11 +71,26 @@ def build_knowledge_base():
     raw_docs = loader.load()
     print(f"  📄 加载 {len(raw_docs)} 个文件")
 
-    # 注入元数据
+    # 解析 YAML frontmatter 并注入元数据
     for doc in raw_docs:
         source_file = doc.metadata.get("source", "")
         filename = os.path.basename(source_file)
         parent = os.path.basename(os.path.dirname(source_file))
+
+        # 剥离 frontmatter
+        content = doc.page_content
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                fm_text = parts[1].strip()
+                body = parts[2].strip()
+                # 解析 frontmatter 键值对
+                for line in fm_text.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        doc.metadata[k.strip()] = v.strip()
+                doc.page_content = body
+
         doc.metadata["category"] = parent
         doc.metadata["filename"] = filename.replace(".txt", "")
 
@@ -178,7 +192,6 @@ print("=" * 55)
 # ── 核心函数 ──
 def canton_chat(message, history):
     """广东问答。"""
-    start_time = time.time()
     try:
         result = qa_chain({"query": message})
         answer = result["result"]

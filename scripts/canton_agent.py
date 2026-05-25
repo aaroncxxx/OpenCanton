@@ -17,6 +17,9 @@ from langchain_community.llms import HuggingFaceHub
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
 from langchain.memory import ConversationBufferMemory
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+
 
 # 配置
 EMBEDDING_MODEL = os.getenv("CANTON_EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
@@ -26,7 +29,64 @@ RETRIEVAL_K = int(os.getenv("CANTON_RETRIEVAL_K", "5"))
 FETCH_K = int(os.getenv("CANTON_FETCH_K", "20"))
 PERSIST_DIR = os.getenv("CANTON_PERSIST_DIR", "./canton_knowledge_base")
 COLLECTION_NAME = os.getenv("CANTON_COLLECTION", "canton_collection")
+SOURCE_DIR = os.getenv("CANTON_SOURCE_DIR", "./canton_source_docs")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+
+def build_knowledge_base():
+    """从源文档构建向量库。"""
+    from pathlib import Path as P
+    source_path = P(SOURCE_DIR)
+    if not source_path.exists():
+        print(f"⚠️ 源文档目录不存在: {SOURCE_DIR}")
+        return
+
+    print("🔨 正在构建向量库（首次启动，需要几分钟）...")
+
+    loader = DirectoryLoader(
+        SOURCE_DIR, glob="**/*.txt", loader_cls=TextLoader,
+        loader_kwargs={"encoding": "utf-8"},
+    )
+    raw_docs = loader.load()
+    print(f"  📄 加载 {len(raw_docs)} 个文件")
+
+    for doc in raw_docs:
+        source_file = doc.metadata.get("source", "")
+        filename = os.path.basename(source_file)
+        parent = os.path.basename(os.path.dirname(source_file))
+
+        content = doc.page_content
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                fm_text = parts[1].strip()
+                body = parts[2].strip()
+                for line in fm_text.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        doc.metadata[k.strip()] = v.strip()
+                doc.page_content = body
+
+        doc.metadata["category"] = parent
+        doc.metadata["filename"] = filename.replace(".txt", "")
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=400, chunk_overlap=50,
+        separators=["\n\n", "\n", "。", "；", "，", " ", ""],
+    )
+    chunks = splitter.split_documents(raw_docs)
+    print(f"  📦 生成 {len(chunks)} 个文本块")
+
+    embeddings = HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"normalize_embeddings": True},
+    )
+    Chroma.from_documents(
+        documents=chunks, embedding=embeddings,
+        persist_directory=PERSIST_DIR, collection_name=COLLECTION_NAME,
+    )
+    print("  ✅ 向量库构建完成！")
 
 
 def load_dotenv():
@@ -46,8 +106,13 @@ def load_dotenv():
 
 
 def init_system():
-    """初始化系统。"""
+    """初始化系统（含知识库构建）。"""
     load_dotenv()
+
+    # 确保知识库存在
+    if not os.path.exists(PERSIST_DIR) or not os.listdir(PERSIST_DIR):
+        print("🔨 首次运行，构建知识库...")
+        build_knowledge_base()
 
     embeddings = HuggingFaceEmbeddings(
         model_name=EMBEDDING_MODEL,
